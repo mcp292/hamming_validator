@@ -14,11 +14,6 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mavx -maes")
 set(SOURCE_FILES src/uint256_t.c src/uint256_t.h src/iter/uint256_key_iter.c src/iter/uint256_key_iter.h
         src/util.c src/util.h src/aes256-ni.c src/aes256-ni.h )
 
-add_executable(hamming_validator src/hamming_validator.c ${SOURCE_FILES})
-add_executable(hamming_validator_mpi src/hamming_validator_mpi.c ${SOURCE_FILES})
-
-add_executable(aes256_test src/aes256_test.c src/aes256-ni.c src/aes256-ni.h)
-
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 # Append expected search paths for Monsoon
 list(APPEND CMAKE_PREFIX_PATH /packages/gmp/6.1.2 /packages/sqlite/3.27.1)
@@ -29,18 +24,30 @@ list(APPEND CMAKE_PREFIX_PATH /usr/local/opt/libomp /usr/local/opt/open-mpi /usr
 set(CMAKE_THREAD_PREFER_PTHREAD ON)
 
 find_package(OpenMP REQUIRED)
-find_package(MPI REQUIRED)
+find_package(MPI)
 find_package(Threads REQUIRED)
 find_package(GMP 6.0.0 MODULE REQUIRED)
 find_package(UUID MODULE REQUIRED)
 find_package(Argp MODULE REQUIRED)
+
+add_executable(hamming_validator src/hamming_validator.c ${SOURCE_FILES})
+if(MPI_C_FOUND)
+    add_executable(hamming_validator_mpi src/hamming_validator_mpi.c ${SOURCE_FILES})
+endif(MPI_C_FOUND)
+
+add_executable(aes256_test src/aes256_test.c src/aes256-ni.c src/aes256-ni.h)
 
 include_directories(${GMP_INCLUDES})
 include_directories(${UUID_INCLUDE_DIRS})
 include_directories(${ARGP_INCLUDE_DIR})
 
 target_link_libraries(hamming_validator OpenMP::OpenMP_C ${UUID_LIBRARIES} ${GMP_LIBRARIES} ${ARGP_LIBRARIES})
-target_link_libraries(hamming_validator_mpi MPI::MPI_C Threads::Threads ${UUID_LIBRARIES} ${GMP_LIBRARIES} ${ARGP_LIBRARIES})
+if(MPI_C_FOUND)
+    target_link_libraries(hamming_validator_mpi MPI::MPI_C Threads::Threads ${UUID_LIBRARIES}
+            ${GMP_LIBRARIES} ${ARGP_LIBRARIES})
+endif(MPI_C_FOUND)
 
 install(TARGETS hamming_validator RUNTIME DESTINATION bin)
-install(TARGETS hamming_validator_mpi RUNTIME DESTINATION bin)
+if(MPI_C_FOUND)
+    install(TARGETS hamming_validator_mpi RUNTIME DESTINATION bin)
+endif(MPI_C_FOUND)
