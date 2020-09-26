@@ -57,6 +57,8 @@ if(NOT CYGWIN)
     target_link_libraries(ecc_validator_mpi MPI::MPI_C ${UUID_LIBRARIES} ${GMP_LIBRARIES} ${ARGP_LIBRARIES})
 endif(NOT CYGWIN)
 
+#target_compile_definitions(aes_validator_mpi PRIVATE ALLREDUCE)
+
 install(TARGETS aes_validator RUNTIME DESTINATION bin)
 install(TARGETS ecc_validator RUNTIME DESTINATION bin)
 

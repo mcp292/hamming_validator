@@ -233,20 +233,31 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 /// \param verbose If set to non-zero, print verbose information to stderr.
 /// \return Returns a 1 if found or a 0 if not. Returns a -1 if an error has occurred.
 int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
-        const uint256_t *last_perm, const unsigned char *key, uuid_t userId,
-        const unsigned char *auth_cipher, int all, long long int *validated_keys, int verbose, int my_rank,
-        int nprocs, int *global_found) {
+                  const uint256_t *last_perm, const unsigned char *key, uuid_t userId,
+                  const unsigned char *auth_cipher, int all, long long int *validated_keys, int verbose,
+#if defined(ALLREDUCE)
+                  int my_rank) {
+#else // defined(ALLREDUCE)
+                  int my_rank, int nprocs, int *global_found) {
+#endif // defined(ALLREDUCE)
+
     // Declaration
     unsigned char cipher[BLOCK_SIZE];
     int status = 0;
     int probe_flag = 0;
     long long int iter_count = 0;
 
+#if defined(ALLREDUCE)
+    int found = 0, global_found;
+#endif // defined(ALLREDUCE)
+
     uint256_key_iter *iter;
     aes256_enc_key_scheduler *key_scheduler;
 
+#if !defined(ALLREDUCE)
     MPI_Request *requests;
     MPI_Status *statuses;
+#endif // !defined(ALLREDUCE)
 
     // Memory allocation
     if((key_scheduler = aes256_enc_key_scheduler_create()) == NULL) {
@@ -264,6 +275,7 @@ int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
         return -1;
     }
 
+#if !defined(ALLREDUCE)
     if((requests = malloc(sizeof(MPI_Request) * nprocs)) == NULL) {
         perror("Error");
 
@@ -283,9 +295,14 @@ int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
 
         return -1;
     }
+#endif // !defined(ALLREDUCE)
 
     // While we haven't reached the end of iteration
+#if defined(ALLREDUCE)
+    while(!uint256_key_iter_end(iter)) {
+#else // defined(ALLREDUCE)
     while(!uint256_key_iter_end(iter) && (all || !(*global_found))) {
+#endif // defined(ALLREDUCE)
         ++iter_count;
 
         if(validated_keys != NULL) {
@@ -302,13 +319,16 @@ int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
 
         // If the new cipher is the same as the passed in auth_cipher, set found to true and break
         if(memcmp(cipher, auth_cipher, sizeof(uuid_t)) == 0) {
+#if !defined(ALLREDUCE)
             *global_found = 1;
+#endif // !defined(ALLREDUCE)
             status = 1;
 
             if(verbose) {
                 fprintf(stderr, "INFO: Found by rank: %d, alerting ranks ...\n", my_rank);
             }
 
+#if !defined(ALLREDUCE)
             if(!all) {
                 // alert all ranks that the key was found, including yourself
                 for (int i = 0; i < nprocs; i++) {
@@ -324,23 +344,36 @@ int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
                     }
                 }
             }
+#endif // defined(ALLREDUCE)
         }
 
+#if defined(ALLREDUCE)
+        if(!all && iter_count % 8192 == 0) {
+            MPI_Allreduce(&found, &global_found, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+
+            if(global_found) {
+                break;
+            }
+        }
+#else // defined(ALLREDUCE)
         if (!all && !(*global_found) && iter_count % 128 == 0) {
             MPI_Iprobe(MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &probe_flag, MPI_STATUS_IGNORE);
 
             if(probe_flag) {
                 MPI_Recv(global_found, 1, MPI_INT, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD,
-                        MPI_STATUS_IGNORE);
+                         MPI_STATUS_IGNORE);
             }
         }
+#endif // defined(ALLREDUCE)
 
         uint256_key_iter_next(iter);
     }
 
     // Cleanup
+#if !defined(ALLREDUCE)
     free(statuses);
     free(requests);
+#endif // !defined(ALLREDUCE)
 
     uint256_key_iter_destroy(iter);
     aes256_enc_key_scheduler_destroy(key_scheduler);
@@ -361,7 +394,9 @@ int main(int argc, char *argv[]) {
     struct arguments arguments = { 0 };
     static struct argp argp = {options, parse_opt, args_doc, prog_desc, 0, 0, 0};
 
+#if !defined(ALLREDUCE)
     int global_found = 0;
+#endif // !defined(ALLREDUCE)
     int subfound = 0;
 
     gmp_randstate_t randstate;
@@ -519,7 +554,11 @@ int main(int argc, char *argv[]) {
     // Initialize time for root rank
     start_time = MPI_Wtime();
 
+#if defined(ALLREDUCE)
+    for (; mismatch <= ending_mismatch; mismatch++) {
+#else // defined(ALLREDUCE)
     for (; mismatch <= ending_mismatch && !global_found; mismatch++) {
+#endif // defined(ALLREDUCE)
         if(my_rank == 0 && arguments.verbose) {
             fprintf(stderr, "INFO: Checking a hamming distance of %d...\n", mismatch);
         }
@@ -536,10 +575,15 @@ int main(int argc, char *argv[]) {
             }
 
             uint256_get_perm_pair(&starting_perm, &ending_perm, (size_t)my_rank, max_count, mismatch,
-                    arguments.subkey_length);
+                                  arguments.subkey_length);
             subfound = gmp_validator(corrupted_key, &starting_perm, &ending_perm, key, userId,
-                    auth_cipher, arguments.all, arguments.count ? &validated_keys : NULL,
-                    arguments.verbose, my_rank, max_count, &global_found);
+                                     auth_cipher, arguments.all, arguments.count ? &validated_keys : NULL,
+#if defined(ALLREDUCE)
+                                     arguments.verbose, my_rank);
+#else // defined(ALLREDUCE)
+                                     arguments.verbose, my_rank, max_count, &global_found);
+#endif // defined(ALLREDUCE)
+
             if (subfound < 0) {
                 // Cleanup
                 mpz_clear(key_count);
@@ -552,10 +596,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
+#if !defined(ALLREDUCE)
     if(!(arguments.all) && subfound == 0 && !global_found) {
-        fprintf(stderr, "Rank %d Bleh\n", my_rank);
         MPI_Recv(&global_found, 1, MPI_INT, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
+#endif // !defined(ALLREDUCE)
 
     duration = MPI_Wtime() - start_time;
 
