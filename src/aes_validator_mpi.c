@@ -235,21 +235,12 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
                   const uint256_t *last_perm, const unsigned char *key, uuid_t userId,
                   const unsigned char *auth_cipher, int all, long long int *validated_keys, int verbose,
-#if defined(ALLREDUCE)
-                  int my_rank) {
-#else // defined(ALLREDUCE)
                   int my_rank, int nprocs, int *global_found) {
-#endif // defined(ALLREDUCE)
-
     // Declaration
     unsigned char cipher[BLOCK_SIZE];
     int status = 0;
     int probe_flag = 0;
     long long int iter_count = 0;
-
-#if defined(ALLREDUCE)
-    int found = 0, global_found;
-#endif // defined(ALLREDUCE)
 
     uint256_key_iter *iter;
     aes256_enc_key_scheduler *key_scheduler;
@@ -297,10 +288,10 @@ int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
     }
 #endif // !defined(ALLREDUCE)
 
-    // While we haven't reached the end of iteration
 #if defined(ALLREDUCE)
-    while(!uint256_key_iter_end(iter)) {
+    while(!uint256_key_iter_end(iter) && (nprocs > 1 || !(*global_found))) {
 #else // defined(ALLREDUCE)
+    // While we haven't reached the end of iteration
     while(!uint256_key_iter_end(iter) && (all || !(*global_found))) {
 #endif // defined(ALLREDUCE)
         ++iter_count;
@@ -319,9 +310,7 @@ int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
 
         // If the new cipher is the same as the passed in auth_cipher, set found to true and break
         if(memcmp(cipher, auth_cipher, sizeof(uuid_t)) == 0) {
-#if !defined(ALLREDUCE)
             *global_found = 1;
-#endif // !defined(ALLREDUCE)
             status = 1;
 
             if(verbose) {
@@ -349,9 +338,9 @@ int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
 
 #if defined(ALLREDUCE)
         if(!all && iter_count % 8192 == 0) {
-            MPI_Allreduce(&found, &global_found, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+            MPI_Allreduce(MPI_IN_PLACE, global_found, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
 
-            if(global_found) {
+            if(*global_found) {
                 break;
             }
         }
@@ -394,9 +383,7 @@ int main(int argc, char *argv[]) {
     struct arguments arguments = { 0 };
     static struct argp argp = {options, parse_opt, args_doc, prog_desc, 0, 0, 0};
 
-#if !defined(ALLREDUCE)
     int global_found = 0;
-#endif // !defined(ALLREDUCE)
     int subfound = 0;
 
     gmp_randstate_t randstate;
@@ -554,11 +541,7 @@ int main(int argc, char *argv[]) {
     // Initialize time for root rank
     start_time = MPI_Wtime();
 
-#if defined(ALLREDUCE)
-    for (; mismatch <= ending_mismatch; mismatch++) {
-#else // defined(ALLREDUCE)
     for (; mismatch <= ending_mismatch && !global_found; mismatch++) {
-#endif // defined(ALLREDUCE)
         if(my_rank == 0 && arguments.verbose) {
             fprintf(stderr, "INFO: Checking a hamming distance of %d...\n", mismatch);
         }
@@ -578,12 +561,7 @@ int main(int argc, char *argv[]) {
                                   arguments.subkey_length);
             subfound = gmp_validator(corrupted_key, &starting_perm, &ending_perm, key, userId,
                                      auth_cipher, arguments.all, arguments.count ? &validated_keys : NULL,
-#if defined(ALLREDUCE)
-                                     arguments.verbose, my_rank);
-#else // defined(ALLREDUCE)
                                      arguments.verbose, my_rank, max_count, &global_found);
-#endif // defined(ALLREDUCE)
-
             if (subfound < 0) {
                 // Cleanup
                 mpz_clear(key_count);
