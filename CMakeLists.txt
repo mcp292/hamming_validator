@@ -11,7 +11,9 @@ set(CMAKE_C_STANDARD 11)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mavx -maes")
 
-set(SOURCE_FILES src/uint256_t.c src/uint256_t.h src/iter/uint256_key_iter.c src/iter/uint256_key_iter.h
+set(SOURCE_FILES src/uint256_t.c src/uint256_t.h
+        src/iter/gmp_key_iter.c src/iter/gmp_key_iter.h
+        src/iter/uint256_key_iter.c src/iter/uint256_key_iter.h
         src/util.c src/util.h)
 # note micro-ecc from https://github.com/kmackay/micro-ecc.git
 set(uECC_FILES lib/micro-ecc/uECC.c lib/micro-ecc/uECC.h)
@@ -33,8 +35,9 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 list(APPEND CMAKE_PREFIX_PATH /packages/gmp/6.1.2 /packages/sqlite/3.27.1)
 # Append expected search paths for Mac OS X via Homebrew
 list(APPEND CMAKE_PREFIX_PATH /usr/local/opt/libomp /usr/local/opt/open-mpi /usr/local/opt/ossp-uuid
-        /usr/local/opt/gmp)
+        /usr/local/opt/gmp /packages/openssl/1.1.1)
 
+find_package(OpenSSL 1.1 REQUIRED)
 find_package(OpenMP REQUIRED)
 if(NOT CYGWIN)
     find_package(MPI REQUIRED)
@@ -53,7 +56,7 @@ target_link_libraries(aes_validator OpenMP::OpenMP_C ${UUID_LIBRARIES} ${GMP_LIB
 target_link_libraries(ecc_validator OpenMP::OpenMP_C ${UUID_LIBRARIES} ${GMP_LIBRARIES} ${ARGP_LIBRARIES})
 
 if(NOT CYGWIN)
-    target_link_libraries(aes_validator_mpi MPI::MPI_C ${UUID_LIBRARIES} ${GMP_LIBRARIES} ${ARGP_LIBRARIES})
+    target_link_libraries(aes_validator_mpi OpenSSL::SSL MPI::MPI_C ${UUID_LIBRARIES} ${GMP_LIBRARIES} ${ARGP_LIBRARIES})
     target_link_libraries(ecc_validator_mpi MPI::MPI_C ${UUID_LIBRARIES} ${GMP_LIBRARIES} ${ARGP_LIBRARIES})
 endif(NOT CYGWIN)
 

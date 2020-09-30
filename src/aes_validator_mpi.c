@@ -2,18 +2,34 @@
 // Created by cp723 on 2/7/2019.
 //
 
+//#define RBC_OPENSSL
+//#define RBC_GMP
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <mpi.h>
 
+#if defined(RBC_OPENSSL)
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#endif // defined(RBC_OPENSSL)
+
 #include <uuid/uuid.h>
 #include <gmp.h>
 #include <argp.h>
 
+#if defined(RBC_GMP)
+#include "iter/gmp_key_iter.h"
+#else // defined(RBC_GMP)
 #include "iter/uint256_key_iter.h"
+#endif // defined(RBC_GMP)
+
+#if !defined(RBC_OPENSSL)
 #include "aes256-ni.h"
+#endif // !defined(RBC_OPENSSL)
+
 #include "util.h"
 
 #define ERROR_CODE_FOUND 0
@@ -218,6 +234,47 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     return 0;
 }
 
+#if defined(RBC_OPENSSL)
+int encrypt_msg(unsigned char *cipher, int *outlen, const unsigned char *key, const unsigned char *msg,
+                size_t msg_len) {
+    int tmplen;
+    EVP_CIPHER_CTX *ctx;
+
+    if((ctx = EVP_CIPHER_CTX_new()) == NULL) {
+        return 1;
+    }
+
+    if(!EVP_EncryptInit_ex(ctx, EVP_aes_256_ecb(), NULL, key, NULL)) {
+        fprintf(stderr, "ERROR: EVP_EncryptInit_ex failed.\nOpenSSL Error: %s\n",
+                ERR_error_string(ERR_get_error(), NULL));
+        EVP_CIPHER_CTX_free(ctx);
+        return 1;
+    }
+
+    if(!EVP_EncryptUpdate(ctx, cipher, &tmplen, msg, (int)msg_len)) {
+        fprintf(stderr, "ERROR: EVP_EncryptUpdate failed.\nOpenSSL Error: %s\n",
+                ERR_error_string(ERR_get_error(), NULL));
+        EVP_CIPHER_CTX_free(ctx);
+        return 1;
+    }
+
+    *outlen = tmplen;
+
+    if(!EVP_EncryptFinal_ex(ctx, cipher, &tmplen)) {
+        fprintf(stderr, "ERROR: EVP_EncryptFinal_ex failed.\nOpenSSL Error: %s\n",
+                ERR_error_string(ERR_get_error(), NULL));
+        EVP_CIPHER_CTX_free(ctx);
+        return 1;
+    }
+
+    *outlen += tmplen;
+
+    EVP_CIPHER_CTX_free(ctx);
+
+    return 0;
+}
+#endif // defined(RBC_OPENSSL)
+
 /// Given a starting permutation, iterate forward through every possible permutation until one that's
 /// matching last_perm is found, or until a matching cipher is found.
 /// \param corrupted_key An allocated corrupted key to fill if the corrupted key was found. Must be at
@@ -232,34 +289,56 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 /// skipped.
 /// \param verbose If set to non-zero, print verbose information to stderr.
 /// \return Returns a 1 if found or a 0 if not. Returns a -1 if an error has occurred.
+#if defined(RBC_GMP)
+int gmp_validator(unsigned char *corrupted_key, const mpz_t starting_perm,
+        const mpz_t last_perm, const unsigned char *key, uuid_t userId,
+#else // defined(RBC_GMP)
 int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
         const uint256_t *last_perm, const unsigned char *key, uuid_t userId,
-        const unsigned char *auth_cipher, int all, long long int *validated_keys, int verbose, int my_rank,
-        int nprocs, int *global_found) {
+#endif // defined(RBC_GMP)
+        const unsigned char *auth_cipher, int all, long long int *validated_keys, int verbose,
+        int my_rank, int nprocs, int *global_found) {
     // Declaration
     unsigned char cipher[BLOCK_SIZE];
     int status = 0;
     int probe_flag = 0;
     long long int iter_count = 0;
 
+#if defined(RBC_GMP)
+    gmp_key_iter *iter;
+#else // defined(RBC_GMP)
     uint256_key_iter *iter;
+#endif // defined(RBC_GMP)
+
+#if defined(RBC_OPENSSL)
+    int outlen;
+#else // !defined(RBC_OPENSSL)
     aes256_enc_key_scheduler *key_scheduler;
+#endif // !defined(RBC_OPENSSL)
 
     MPI_Request *requests;
     MPI_Status *statuses;
 
     // Memory allocation
+#if !defined(RBC_OPENSSL)
     if((key_scheduler = aes256_enc_key_scheduler_create()) == NULL) {
         perror("Error");
 
         return -1;
     }
+#endif // defined(RBC_OPENSSL)
 
     // Allocation and initialization
+#if defined(RBC_GMP)
+    if((iter = gmp_key_iter_create(key, KEY_SIZE, starting_perm, last_perm)) == NULL) {
+#else // defined(RBC_GMP)
     if((iter = uint256_key_iter_create(key, starting_perm, last_perm)) == NULL) {
+#endif // defined(RBC_GMP)
         perror("Error");
 
+#if !defined(RBC_OPENSSL)
         aes256_enc_key_scheduler_destroy(key_scheduler);
+#endif // !defined(RBC_OPENSSL)
 
         return -1;
     }
@@ -267,8 +346,15 @@ int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
     if((requests = malloc(sizeof(MPI_Request) * nprocs)) == NULL) {
         perror("Error");
 
+#if defined(RBC_GMP)
+        gmp_key_iter_destroy(iter);
+#else // defined(RBC_GMP)
         uint256_key_iter_destroy(iter);
+#endif // defined(RBC_GMP)
+
+#if !defined(RBC_OPENSSL)
         aes256_enc_key_scheduler_destroy(key_scheduler);
+#endif // !defined(RBC_OPENSSL)
 
         return -1;
     }
@@ -278,27 +364,54 @@ int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
 
         free(requests);
 
+#if defined(RBC_GMP)
+        gmp_key_iter_destroy(iter);
+#else // defined(RBC_GMP)
         uint256_key_iter_destroy(iter);
+#endif // defined(RBC_GMP)
+
+#if !defined(RBC_OPENSSL)
         aes256_enc_key_scheduler_destroy(key_scheduler);
+#endif // !defined(RBC_OPENSSL)
 
         return -1;
     }
 
     // While we haven't reached the end of iteration
+#if defined(RBC_GMP)
+    while(!gmp_key_iter_end(iter) && (all || !(*global_found))) {
+#else // defined(RBC_GMP)
     while(!uint256_key_iter_end(iter) && (all || !(*global_found))) {
+#endif // defined(RBC_GMP)
         ++iter_count;
 
         if(validated_keys != NULL) {
             ++(*validated_keys);
         }
-        uint256_key_iter_get(iter, corrupted_key);
-        aes256_enc_key_scheduler_update(key_scheduler, corrupted_key);
 
+#if defined(RBC_GMP)
+        gmp_key_iter_get(iter, corrupted_key);
+#else
+        uint256_key_iter_get(iter, corrupted_key);
+#endif
+
+#if !defined(RBC_OPENSSL)
+        aes256_enc_key_scheduler_update(key_scheduler, corrupted_key);
+#endif
+
+#if defined(RBC_OPENSSL)
+        // If encryption fails for some reason, break prematurely.
+        if(encrypt_msg(cipher, &outlen, corrupted_key, userId, sizeof(uuid_t))) {
+            status = -1;
+            break;
+        }
+#else
         // If encryption fails for some reason, break prematurely.
         if(aes256_ecb_encrypt(cipher, key_scheduler, userId, sizeof(uuid_t))) {
             status = -1;
             break;
         }
+#endif
 
         // If the new cipher is the same as the passed in auth_cipher, set found to true and break
         if(memcmp(cipher, auth_cipher, sizeof(uuid_t)) == 0) {
@@ -335,15 +448,26 @@ int gmp_validator(unsigned char *corrupted_key, const uint256_t *starting_perm,
             }
         }
 
+#if defined(RBC_GMP)
+        gmp_key_iter_next(iter);
+#else // defined(RBC_GMP)
         uint256_key_iter_next(iter);
+#endif // defined(RBC_GMP)
     }
 
     // Cleanup
     free(statuses);
     free(requests);
 
+#if defined(RBC_GMP)
+    gmp_key_iter_destroy(iter);
+#else
     uint256_key_iter_destroy(iter);
+#endif
+
+#if !defined(RBC_OPENSSL)
     aes256_enc_key_scheduler_destroy(key_scheduler);
+#endif
 
     return status;
 }
@@ -373,12 +497,20 @@ int main(int argc, char *argv[]) {
     unsigned char *corrupted_key;
     unsigned char auth_cipher[BLOCK_SIZE];
 
+#if defined(RBC_OPENSSL)
+    int outlen;
+#else
     aes256_enc_key_scheduler *key_scheduler;
+#endif // defined(RBC_OPENSSL)
 
     int mismatch = 0;
     int ending_mismatch = KEY_SIZE * 8;
 
+#if defined(RBC_GMP)
+    mpz_t starting_perm, ending_perm;
+#else
     uint256_t starting_perm, ending_perm;
+#endif
     size_t max_count;
     mpz_t key_count;
     double start_time, duration, key_rate;
@@ -398,6 +530,7 @@ int main(int argc, char *argv[]) {
         MPI_Abort(MPI_COMM_WORLD, ERROR_CODE_FAILURE);
     }
 
+#if !defined(RBC_OPENSSL)
     if((key_scheduler = aes256_enc_key_scheduler_create()) == NULL) {
         perror("ERROR");
         free(corrupted_key);
@@ -405,8 +538,13 @@ int main(int argc, char *argv[]) {
 
         MPI_Abort(MPI_COMM_WORLD, ERROR_CODE_FAILURE);
     }
+#endif // !defined(RBC_OPENSSL)
 
     mpz_init(key_count);
+
+#if defined(RBC_GMP)
+    mpz_inits(starting_perm, ending_perm, NULL);
+#endif
 
     // Default to -1 for no mismatches provided, aka. go through all mismatches.
     arguments.mismatches = -1;
@@ -435,8 +573,7 @@ int main(int argc, char *argv[]) {
             if (arguments.random) {
                 fprintf(stderr, "WARNING: Random mode set. All three arguments will be ignored"
                                 " and randomly generated ones will be used in their place.\n");
-            }
-            else if (arguments.benchmark) {
+            } else if (arguments.benchmark) {
                 fprintf(stderr, "WARNING: Benchmark mode set. All three arguments will be ignored"
                                 " and randomly generated ones will be used in their place.\n");
             }
@@ -447,11 +584,20 @@ int main(int argc, char *argv[]) {
             get_random_corrupted_key(corrupted_key, key, arguments.mismatches,
                                      arguments.subkey_length, randstate, arguments.benchmark, nprocs);
 
+#if defined(RBC_OPENSSL)
+            if (encrypt_msg(auth_cipher, &outlen, corrupted_key, userId, sizeof(uuid_t))) {
+#else
             aes256_enc_key_scheduler_update(key_scheduler, corrupted_key);
             if (aes256_ecb_encrypt(auth_cipher, key_scheduler, userId, sizeof(uuid_t))) {
+#endif
                 // Cleanup
                 mpz_clear(key_count);
+#if defined(RBC_GMP)
+                mpz_clears(starting_perm, ending_perm, NULL);
+#endif // defined(RBC_GMP)
+#if !defined(RBC_OPENSSL)
                 aes256_enc_key_scheduler_destroy(key_scheduler);
+#endif // !defined(RBC_OPENSSL)
                 free(corrupted_key);
                 free(key);
 
@@ -535,15 +681,32 @@ int main(int argc, char *argv[]) {
                 max_count = mpz_get_ui(key_count);
             }
 
+#if defined(RBC_GMP)
+            gmp_get_perm_pair(starting_perm, ending_perm, (size_t)my_rank, max_count, mismatch,
+                    arguments.subkey_length);
+            subfound = gmp_validator(corrupted_key, starting_perm, ending_perm, key, userId,
+                                     auth_cipher, arguments.all,
+                                     arguments.count ? &validated_keys : NULL,
+                                     arguments.verbose, my_rank, max_count, &global_found);
+            printf("HELP\n");
+#else
             uint256_get_perm_pair(&starting_perm, &ending_perm, (size_t)my_rank, max_count, mismatch,
                     arguments.subkey_length);
             subfound = gmp_validator(corrupted_key, &starting_perm, &ending_perm, key, userId,
-                    auth_cipher, arguments.all, arguments.count ? &validated_keys : NULL,
-                    arguments.verbose, my_rank, max_count, &global_found);
+                                     auth_cipher, arguments.all, arguments.count ? &validated_keys : NULL,
+                                     arguments.verbose, my_rank, max_count, &global_found);
+#endif
+
+
             if (subfound < 0) {
                 // Cleanup
                 mpz_clear(key_count);
+#if defined(RBC_GMNP)
+                mpz_clears(starting_perm, ending_perm, NULL);
+#endif // defined(RBC_GMNP)
+#if !defined(RBC_OPENSSL)
                 aes256_enc_key_scheduler_destroy(key_scheduler);
+#endif // !defined(RBC_OPENSSL)
                 free(corrupted_key);
                 free(key);
 
@@ -552,7 +715,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if(!(arguments.all) && subfound == 0 && !global_found) {
+    if(!(arguments.all) && nprocs > 1 && subfound == 0 && !global_found) {
         fprintf(stderr, "Rank %d Bleh\n", my_rank);
         MPI_Recv(&global_found, 1, MPI_INT, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     }
@@ -596,7 +759,12 @@ int main(int argc, char *argv[]) {
 
     // Cleanup
     mpz_clear(key_count);
+#if defined(RBC_GMNP)
+    mpz_clears(starting_perm, ending_perm, NULL);
+#endif // defined(RBC_GMNP)
+#if !defined(RBC_OPENSSL)
     aes256_enc_key_scheduler_destroy(key_scheduler);
+#endif // !defined(RBC_OPENSSL)
     free(corrupted_key);
     free(key);
 
